@@ -18,7 +18,7 @@ SRC_FILES := $(wildcard src/*.cpp src/imgui/*.cpp)
 OBJ_FILES := $(SRC_FILES:.cpp=.o)
 
 # Executable name
-OUTPUT := bin/game
+OUTPUT := bin/myTerminal
 
 # Default target
 all: $(OUTPUT)
