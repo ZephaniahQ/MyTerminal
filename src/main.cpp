@@ -1,4 +1,3 @@
-
 #include <SFML/Graphics.hpp>
 #include <iostream>
 #include <cstring>
@@ -15,11 +14,12 @@ class Console{
         static const int spacer = 10;
 
         std::vector<std::string> history; 
+        bool newLineTriggered;
 
         std::string inputLine; 
         std::string ouput;
+        std::string promptStr;
         char buffer[256];
-
 
         sf::Text m_text;
         sf::Text prompt;
@@ -34,7 +34,8 @@ class Console{
         Console(std::string fontfile) : m_height(0), cursorVisible(false)
     {
         loadFont(fontfile);
-        prompt.setString("myTerminal_> ");
+        promptStr = "myTerm_> ";
+        prompt.setString(promptStr);
         prompt.setFont(font);
         prompt.setOrigin(0,0);
         prompt.setPosition(0,5);
@@ -45,6 +46,9 @@ class Console{
         cursor.setFont(font);
         cursor.setCharacterSize(24);
         cursor.setFillColor(sf::Color::White);
+
+        buffer[0] = '\0';
+        newLineTriggered = false;
     }
 
         void loadFont(std::string filename)
@@ -53,6 +57,26 @@ class Console{
                 std::cout << "font load failed" << std::endl;
             else std::cout << "Successfull loaded font" << std::endl;
             m_text.setFont(font);
+            m_text.setCharacterSize(24);
+            m_text.setFillColor(sf::Color::White);
+        }
+
+        bool separatePrompt(std::string& line)
+        {
+            int tilde = line.find("~");
+            int dollar = line.find("$");
+
+            if(tilde >= 0 && dollar >=0)
+            {
+                std::string pwd = line.substr(tilde, dollar-tilde + 1);
+                promptStr.clear();
+                promptStr = "myTerm_>"+pwd + " ";
+                prompt.setString(promptStr);
+                if(dollar == line.size()-2)
+                    return false;
+                line = line.substr(dollar+1, line.size()-dollar);
+            }
+            return true;
         }
 
         void updateAndDraw(sf::RenderWindow& window)
@@ -62,23 +86,29 @@ class Console{
 
             m_height = spacer;
 
-            for(int i = 0; i<history.size();i++)
+            bool cleared = history.size() != 0 && history[0].find("clear") != std::string::npos;
+            if(!cleared)
             {
-                prompt.setPosition(spacer, m_height);
-                m_text.setPosition(promptWidth + spacer, m_height);
-                m_text.setString(history[i]);
+                for(int i = 0; i<history.size(); i++)
+                {
+                    if(!separatePrompt(history[i]))
+                        continue;
+                    prompt.setPosition(spacer, m_height);
+                    m_text.setOrigin(0,0);
+                    m_text.setPosition(promptWidth + spacer, m_height);
+                    m_text.setString(history[i]);
 
-                window.draw(prompt);
-                window.draw(m_text);
+                    window.draw(prompt);
+                    window.draw(m_text);
 
-                m_height += promptHeight + spacer;
+                    m_height += promptHeight + spacer;
+                }
             }
-
+            else history.pop_back();
+            
             m_text.setString(inputLine);
             m_text.setOrigin(0,0);
             m_text.setPosition(promptWidth + spacer, m_height);
-            m_text.setCharacterSize(24);
-            m_text.setFillColor(sf::Color::White);
 
             prompt.setPosition(spacer, m_height);
             window.draw(prompt);
@@ -112,14 +142,81 @@ class Console{
                 history.clear();
                 history.shrink_to_fit();
             }
-            else
+
+            inputLine += '\r';
+            write(master_fd, inputLine.c_str(),inputLine.size());
+        }
+
+        std::string filterAnsi(std::string buffer)
+        {
+            std::string cleanOutput = "";
+
+            for(int i = 0; i< buffer.size(); i++)
             {
-                history.push_back(inputLine);
+                if(buffer[i] == '\x1B' && cleanOutput != inputLine + '\r')
+                {
+                    while(i<buffer.size() && buffer[i] != 'm') i++;
+                    continue;
+                }
+
+                if(isprint(buffer[i]) || buffer[i] == '\n')
+                {
+                    cleanOutput += buffer[i];
+                }
             }
 
-            write(master_fd, inputLine.c_str(),inputLine.size());
-            write(master_fd, "\n", 1);
-            inputLine.clear();
+            return cleanOutput;
+        }
+
+        std::string filterAnsi(char* buf, int size)
+        {
+            std::string cleanOutput = "";
+
+            for(int i = 0; i< size; i++)
+            {
+                if(buffer[i] == '\x1B' && cleanOutput != inputLine + '\r')
+                {
+                    while(i<size && buffer[i] != 'm') i++;
+                    continue;
+                }
+
+                if(isprint(buffer[i]) || buffer[i] == '\n')
+                {
+                    cleanOutput += buffer[i];
+                    if(buffer[i] == '\n')
+                        continue;
+                }
+            }
+
+            return cleanOutput;
+        }
+
+        void getResult(int master_fd)
+        {
+
+            ssize_t bytesRead;
+            std::string cleanOutput;
+
+            while((bytesRead = read(master_fd, buffer, sizeof(buffer)-1)) > 0)
+            {
+                buffer[bytesRead] = '\0';
+                cleanOutput = "";
+                
+                cleanOutput = filterAnsi(buffer, bytesRead);
+
+                if(!cleanOutput.empty() && cleanOutput != inputLine && cleanOutput != inputLine + "\r")
+                {
+                    history.push_back(cleanOutput);
+                }
+                inputLine.clear();
+            }
+
+            if(bytesRead < 0 && errno != EAGAIN)
+            {
+                std::cerr << "Read error: " << strerror(errno) << std::endl;
+            }
+
+
         }
 
         void updateCursorClock()
@@ -142,8 +239,8 @@ int main()
     pid_t pid = forkpty(&master_fd, nullptr, nullptr, nullptr);
     fcntl(master_fd, F_SETFL, O_NONBLOCK);
 
-    int sWidth = 640;
-    int sHeight = 480;
+    int sWidth = 1600;
+    int sHeight = 900;
 
     if(pid < 0)
     {
@@ -151,7 +248,8 @@ int main()
     }
     else if(pid == 0)
     {
-        execlp("/bin/bash", "bash", nullptr); //run bash
+        //execlp("/bin/bash", "bash","--norc", "-i", nullptr); //run bash
+        execlp("/bin/bash", "bash","--norc", "-i", "-c", "PS1='\\w > ' bash", nullptr); //run bash
         std::cerr << "exec failed!" << std::endl;
         return 1;
     }
@@ -180,7 +278,10 @@ int main()
                 if(event.type == sf::Event::Closed)
                     window.close();
                 if(sf::Keyboard::isKeyPressed(sf::Keyboard::Escape))
+                {
                     window.close();
+                    exit(0);
+                }
                 if(event.type == sf::Event::TextEntered) {
                     if(event.text.unicode < 128) {
                         char enteredChar = static_cast<char>(event.text.unicode);
@@ -198,19 +299,9 @@ int main()
                 }
             }
 
-            //read from child:
-
-            ssize_t bytesRead;
-            while((bytesRead = read(master_fd, console.buffer, sizeof(console.buffer)-1)) > 0)
-            {
-                console.buffer[bytesRead] = '\0';
-                std::cout << console.buffer << std::endl;
-                std::memset(console.buffer, 0, sizeof(console.buffer));
-                //console.history.push_back(console.buffer);
-            }
-
             window.clear(sf::Color::Black);
             console.updateAndDraw(window);
+            console.getResult(master_fd);
             window.display();
         }
 
